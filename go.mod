@@ -1,4 +1,4 @@
-module github.com/s4bb4t/zapang/v2
+module github.com/s4bb4t/zapang
 
 go 1.25.3
 
