@@ -6,16 +6,15 @@ type Config struct {
 	// Valid values: debug, info, warn, error, dpanic, panic, fatal
 	Level string `yaml:"level" json:"level" mapstructure:"level"`
 
-	// Environment controls the encoder preset.
-	// "development" uses console encoder with colored output.
-	// "production" uses JSON encoder optimized for log aggregation.
+	// Environment controls logger behavior.
+	// "local" - only human-readable console output
+	// "dev", "prod" - human-readable console + optional JSON export
 	Environment string `yaml:"environment" json:"environment" mapstructure:"environment"`
 
-	// OutputPaths is a list of URLs or file paths to write logging output to.
-	OutputPaths []string `yaml:"output_paths" json:"output_paths" mapstructure:"output_paths"`
-
-	// ErrorOutputPaths is a list of URLs or file paths for internal logger errors.
-	ErrorOutputPaths []string `yaml:"error_output_paths" json:"error_output_paths" mapstructure:"error_output_paths"`
+	// ExportPath is an optional path for JSON log export (only for dev/prod).
+	// Can be a file path or "stdout"/"stderr".
+	// If empty, JSON export is disabled.
+	ExportPath string `yaml:"export_path" json:"export_path" mapstructure:"export_path"`
 
 	// Sampling configures log sampling for high-throughput applications.
 	Sampling *SamplingConfig `yaml:"sampling,omitempty" json:"sampling" mapstructure:"sampling"`
@@ -44,9 +43,8 @@ type SamplingConfig struct {
 func DefaultLoggerConfig() Config {
 	return Config{
 		Level:             "info",
-		Environment:       "production",
-		OutputPaths:       []string{"stdout"},
-		ErrorOutputPaths:  []string{"stderr"},
+		Environment:       EnvLocal,
+		ExportPath:        "",
 		DisableCaller:     false,
 		DisableStacktrace: false,
 		StacktraceLevel:   "error",

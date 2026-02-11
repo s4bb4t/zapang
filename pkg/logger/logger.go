@@ -7,6 +7,10 @@ import (
 	"context"
 	"io"
 	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,49 +18,93 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
+const (
+	EnvLocal = "local"
+	EnvProd  = "prod"
+	EnvDev   = "dev"
+)
+
 type ctxKey struct{}
 
 var (
 	globalLogger *zap.Logger
+	globalLevel  zap.AtomicLevel
 	globalMu     sync.RWMutex
+	projectRoot  string
 )
 
-// Logger wraps zap.Logger with additional functionality.
-type Logger struct {
-	*zap.Logger
-	level zap.AtomicLevel
+func init() {
+	// Determine project root at init time by finding the directory containing go.mod
+	_, file, _, ok := runtime.Caller(0)
+	if ok {
+		dir := filepath.Dir(file)
+		for dir != "/" && dir != "." {
+			if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+				projectRoot = dir
+				break
+			}
+			dir = filepath.Dir(dir)
+		}
+	}
 }
 
-// New creates a new Logger based on the provided configuration.
+// rootRelativeCallerEncoder encodes caller path relative to project root for clickable terminal links.
+func rootRelativeCallerEncoder(caller zapcore.EntryCaller, enc zapcore.PrimitiveArrayEncoder) {
+	if !caller.Defined {
+		enc.AppendString("undefined")
+		return
+	}
+
+	path := caller.File
+	if projectRoot != "" && strings.HasPrefix(path, projectRoot) {
+		path = "." + strings.TrimPrefix(path, projectRoot)
+	}
+
+	enc.AppendString(path + ":" + strconv.Itoa(caller.Line))
+}
+
+// New creates a new *zap.Logger based on the provided configuration.
 // The serviceName is added as a permanent field to all log entries.
-// If w is provided, logs will also be written to it (useful for testing or custom outputs).
-func New(ctx context.Context, serviceName string, cfg Config, w io.Writer) *Logger {
+// If w is provided, logs will also be written to it (useful for testing).
+//
+// Output behavior:
+//   - All environments: Human-readable console output to stdout
+//   - Dev/Prod with ExportPath: Additional JSON output for log aggregation
+func New(ctx context.Context, serviceName string, cfg Config, w io.Writer) *zap.Logger {
+	logger, level := NewWithLevel(ctx, serviceName, cfg, w)
+
+	// Set as global logger
+	globalMu.Lock()
+	globalLogger = logger
+	globalLevel = level
+	globalMu.Unlock()
+
+	return logger
+}
+
+// NewWithLevel creates a new *zap.Logger and returns its AtomicLevel for dynamic level control.
+// Use this when you need to change the log level at runtime.
+func NewWithLevel(ctx context.Context, serviceName string, cfg Config, w io.Writer) (*zap.Logger, zap.AtomicLevel) {
 	level := parseLevel(cfg.Level)
 	atomicLevel := zap.NewAtomicLevelAt(level)
 
-	encoderConfig := newEncoderConfig(cfg.Environment)
-
 	var cores []zapcore.Core
 
-	// Build cores for each output path
-	for _, path := range cfg.OutputPaths {
-		core := buildCore(path, atomicLevel, encoderConfig, cfg.Environment)
-		if core != nil {
-			cores = append(cores, core)
+	// Always add human-readable console output to stdout
+	consoleCore := buildConsoleCore(atomicLevel)
+	cores = append(cores, consoleCore)
+
+	// Add JSON export core for dev/prod if ExportPath is configured
+	if cfg.ExportPath != "" && (cfg.Environment == EnvDev || cfg.Environment == EnvProd) {
+		if exportCore := buildJSONExportCore(cfg.ExportPath, atomicLevel); exportCore != nil {
+			cores = append(cores, exportCore)
 		}
 	}
 
-	// Add custom writer if provided
+	// Add custom writer if provided (useful for testing)
 	if w != nil {
-		encoder := newEncoder(cfg.Environment, encoderConfig)
+		encoder := zapcore.NewConsoleEncoder(consoleEncoderConfig())
 		core := zapcore.NewCore(encoder, zapcore.AddSync(w), atomicLevel)
-		cores = append(cores, core)
-	}
-
-	// Fallback to stdout if no cores configured
-	if len(cores) == 0 {
-		encoder := newEncoder(cfg.Environment, encoderConfig)
-		core := zapcore.NewCore(encoder, zapcore.AddSync(os.Stdout), atomicLevel)
 		cores = append(cores, core)
 	}
 
@@ -77,23 +125,13 @@ func New(ctx context.Context, serviceName string, cfg Config, w io.Writer) *Logg
 
 	logger := zap.New(combinedCore, opts...)
 
-	l := &Logger{
-		Logger: logger,
-		level:  atomicLevel,
-	}
-
-	// Set as global logger
-	globalMu.Lock()
-	globalLogger = logger
-	globalMu.Unlock()
-
 	// Register shutdown on context cancellation
 	go func() {
 		<-ctx.Done()
-		_ = l.Sync()
+		_ = logger.Sync()
 	}()
 
-	return l
+	return logger, atomicLevel
 }
 
 // FromContext retrieves the logger from context, or returns the global logger.
@@ -119,37 +157,31 @@ func Global() *zap.Logger {
 	return globalLogger
 }
 
-// SetLevel dynamically changes the logging level.
-func (l *Logger) SetLevel(level string) {
-	l.level.SetLevel(parseLevel(level))
+// GlobalLevel returns the global logger's AtomicLevel for dynamic level control.
+func GlobalLevel() zap.AtomicLevel {
+	globalMu.RLock()
+	defer globalMu.RUnlock()
+	return globalLevel
 }
 
-// GetLevel returns the current logging level.
-func (l *Logger) GetLevel() zapcore.Level {
-	return l.level.Level()
+// SetGlobalLevel dynamically changes the global logger's level.
+func SetGlobalLevel(level string) {
+	globalMu.RLock()
+	defer globalMu.RUnlock()
+	globalLevel.SetLevel(parseLevel(level))
 }
 
 // WithTraceID returns a new logger with trace and span IDs attached.
-func (l *Logger) WithTraceID(traceID, spanID string) *zap.Logger {
+func WithTraceID(l *zap.Logger, traceID, spanID string) *zap.Logger {
 	return l.With(
 		zap.String("trace_id", traceID),
 		zap.String("span_id", spanID),
 	)
 }
 
-// WithFields returns a new logger with the given fields attached.
-func (l *Logger) WithFields(fields ...zap.Field) *zap.Logger {
-	return l.With(fields...)
-}
-
 // WithError returns a new logger with the error attached.
-func (l *Logger) WithError(err error) *zap.Logger {
+func WithError(l *zap.Logger, err error) *zap.Logger {
 	return l.With(zap.Error(err))
-}
-
-// Sugar returns a sugared logger for printf-style logging.
-func (l *Logger) Sugar() *zap.SugaredLogger {
-	return l.Logger.Sugar()
 }
 
 func parseLevel(level string) zapcore.Level {
@@ -173,25 +205,26 @@ func parseLevel(level string) zapcore.Level {
 	}
 }
 
-func newEncoderConfig(env string) zapcore.EncoderConfig {
-	if env == "development" {
-		return zapcore.EncoderConfig{
-			TimeKey:        "ts",
-			LevelKey:       "level",
-			NameKey:        "logger",
-			CallerKey:      "caller",
-			FunctionKey:    zapcore.OmitKey,
-			MessageKey:     "msg",
-			StacktraceKey:  "stacktrace",
-			LineEnding:     zapcore.DefaultLineEnding,
-			EncodeLevel:    zapcore.CapitalColorLevelEncoder,
-			EncodeTime:     zapcore.ISO8601TimeEncoder,
-			EncodeDuration: zapcore.StringDurationEncoder,
-			EncodeCaller:   zapcore.ShortCallerEncoder,
-		}
+// consoleEncoderConfig returns encoder config for human-readable output.
+func consoleEncoderConfig() zapcore.EncoderConfig {
+	return zapcore.EncoderConfig{
+		TimeKey:        "ts",
+		LevelKey:       "level",
+		NameKey:        "logger",
+		CallerKey:      "caller",
+		FunctionKey:    zapcore.OmitKey,
+		MessageKey:     "msg",
+		StacktraceKey:  "stacktrace",
+		LineEnding:     zapcore.DefaultLineEnding,
+		EncodeLevel:    zapcore.CapitalColorLevelEncoder,
+		EncodeTime:     zapcore.ISO8601TimeEncoder,
+		EncodeDuration: zapcore.StringDurationEncoder,
+		EncodeCaller:   rootRelativeCallerEncoder,
 	}
+}
 
-	// Production encoder config optimized for log aggregation (ELK, Splunk, DataDog, etc.)
+// jsonEncoderConfig returns encoder config for JSON export (log aggregation systems).
+func jsonEncoderConfig() zapcore.EncoderConfig {
 	return zapcore.EncoderConfig{
 		TimeKey:        "timestamp",
 		LevelKey:       "level",
@@ -204,18 +237,18 @@ func newEncoderConfig(env string) zapcore.EncoderConfig {
 		EncodeLevel:    zapcore.LowercaseLevelEncoder,
 		EncodeTime:     zapcore.RFC3339NanoTimeEncoder,
 		EncodeDuration: zapcore.MillisDurationEncoder,
-		EncodeCaller:   zapcore.ShortCallerEncoder,
+		EncodeCaller:   rootRelativeCallerEncoder,
 	}
 }
 
-func newEncoder(env string, cfg zapcore.EncoderConfig) zapcore.Encoder {
-	if env == "development" {
-		return zapcore.NewConsoleEncoder(cfg)
-	}
-	return zapcore.NewJSONEncoder(cfg)
+// buildConsoleCore creates a human-readable console core that writes to stdout.
+func buildConsoleCore(level zap.AtomicLevel) zapcore.Core {
+	encoder := zapcore.NewConsoleEncoder(consoleEncoderConfig())
+	return zapcore.NewCore(encoder, zapcore.AddSync(os.Stdout), level)
 }
 
-func buildCore(path string, level zap.AtomicLevel, cfg zapcore.EncoderConfig, env string) zapcore.Core {
+// buildJSONExportCore creates a JSON core for log export/aggregation.
+func buildJSONExportCore(path string, level zap.AtomicLevel) zapcore.Core {
 	var ws zapcore.WriteSyncer
 
 	switch path {
@@ -231,7 +264,7 @@ func buildCore(path string, level zap.AtomicLevel, cfg zapcore.EncoderConfig, en
 		ws = zapcore.AddSync(file)
 	}
 
-	encoder := newEncoder(env, cfg)
+	encoder := zapcore.NewJSONEncoder(jsonEncoderConfig())
 	return zapcore.NewCore(encoder, ws, level)
 }
 
