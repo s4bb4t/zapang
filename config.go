@@ -1,4 +1,4 @@
-package logger
+package zapang
 
 // Config holds configuration for the application logger.
 type Config struct {

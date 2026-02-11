@@ -1,7 +1,7 @@
 // Package logger provides a production-ready structured logging solution built on Uber's Zap.
 // It supports environment-aware configuration, context propagation with trace IDs,
 // log sampling, and graceful shutdown.
-package logger
+package zapang
 
 import (
 	"context"
