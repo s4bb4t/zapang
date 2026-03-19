@@ -48,6 +48,11 @@ func init() {
 	}
 }
 
+// humanTimeEncoder formats time as "02 Jan 15:04:05" for readable console output.
+func humanTimeEncoder(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
+	enc.AppendString(t.Format("02 Jan 15:04:05\t"))
+}
+
 // rootRelativeCallerEncoder encodes caller path relative to project root for clickable terminal links.
 func rootRelativeCallerEncoder(caller zapcore.EntryCaller, enc zapcore.PrimitiveArrayEncoder) {
 	if !caller.Defined {
@@ -94,8 +99,11 @@ func NewWithLevel(ctx context.Context, serviceName string, cfg Config, w io.Writ
 	consoleCore := buildConsoleCore(atomicLevel)
 	cores = append(cores, consoleCore)
 
-	// Add JSON export core for dev/prod if ExportPath is configured
-	if cfg.ExportPath != "" && (cfg.Environment == EnvDev || cfg.Environment == EnvProd) {
+	// Add JSON export core via ExportWriter (any environment) or ExportPath (dev/prod).
+	if cfg.ExportWriter != nil {
+		encoder := newExportEncoder(zapcore.NewJSONEncoder(jsonEncoderConfig()))
+		cores = append(cores, zapcore.NewCore(encoder, zapcore.AddSync(cfg.ExportWriter), atomicLevel))
+	} else if cfg.ExportPath != "" && (cfg.Environment == EnvDev || cfg.Environment == EnvProd) {
 		if exportCore := buildJSONExportCore(cfg.ExportPath, atomicLevel); exportCore != nil {
 			cores = append(cores, exportCore)
 		}
@@ -103,7 +111,7 @@ func NewWithLevel(ctx context.Context, serviceName string, cfg Config, w io.Writ
 
 	// Add custom writer if provided (useful for testing)
 	if w != nil {
-		encoder := zapcore.NewConsoleEncoder(consoleEncoderConfig())
+		encoder := newConsoleEncoder(zapcore.NewConsoleEncoder(consoleEncoderConfig()))
 		core := zapcore.NewCore(encoder, zapcore.AddSync(w), atomicLevel)
 		cores = append(cores, core)
 	}
@@ -217,7 +225,7 @@ func consoleEncoderConfig() zapcore.EncoderConfig {
 		StacktraceKey:  "stacktrace",
 		LineEnding:     zapcore.DefaultLineEnding,
 		EncodeLevel:    zapcore.CapitalColorLevelEncoder,
-		EncodeTime:     zapcore.ISO8601TimeEncoder,
+		EncodeTime:     humanTimeEncoder,
 		EncodeDuration: zapcore.StringDurationEncoder,
 		EncodeCaller:   rootRelativeCallerEncoder,
 	}
@@ -243,7 +251,7 @@ func jsonEncoderConfig() zapcore.EncoderConfig {
 
 // buildConsoleCore creates a human-readable console core that writes to stdout.
 func buildConsoleCore(level zap.AtomicLevel) zapcore.Core {
-	encoder := zapcore.NewConsoleEncoder(consoleEncoderConfig())
+	encoder := newConsoleEncoder(zapcore.NewConsoleEncoder(consoleEncoderConfig()))
 	return zapcore.NewCore(encoder, zapcore.AddSync(os.Stdout), level)
 }
 
@@ -264,7 +272,7 @@ func buildJSONExportCore(path string, level zap.AtomicLevel) zapcore.Core {
 		ws = zapcore.AddSync(file)
 	}
 
-	encoder := zapcore.NewJSONEncoder(jsonEncoderConfig())
+	encoder := newExportEncoder(zapcore.NewJSONEncoder(jsonEncoderConfig()))
 	return zapcore.NewCore(encoder, ws, level)
 }
 

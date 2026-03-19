@@ -1,5 +1,7 @@
 package zapang
 
+import "io"
+
 // Config holds configuration for the application logger.
 type Config struct {
 	// Level is the minimum enabled logging level.
@@ -15,6 +17,12 @@ type Config struct {
 	// Can be a file path or "stdout"/"stderr".
 	// If empty, JSON export is disabled.
 	ExportPath string `yaml:"export_path" json:"export_path" mapstructure:"export_path"`
+
+	// ExportWriter is an optional writer for JSON log export.
+	// When set, JSON-encoded logs are written here in addition to console output.
+	// Use this to pipe logs directly into ClickHouse, Loki, Kafka, etc.
+	// Takes precedence over ExportPath. Works in any environment.
+	ExportWriter io.Writer `yaml:"-" json:"-" mapstructure:"-"`
 
 	// Sampling configures log sampling for high-throughput applications.
 	Sampling *SamplingConfig `yaml:"sampling,omitempty" json:"sampling" mapstructure:"sampling"`
