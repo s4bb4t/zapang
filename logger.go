@@ -50,7 +50,7 @@ func init() {
 
 // humanTimeEncoder formats time as "02 Jan 15:04:05" for readable console output.
 func humanTimeEncoder(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
-	enc.AppendString(t.Format("02 Jan 15:04:05\t"))
+	enc.AppendString(t.Format("02 Jan 15:04:05 MST\t"))
 }
 
 // rootRelativeCallerEncoder encodes caller path relative to project root for clickable terminal links.
